@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
-from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
+from youtube_transcript_api import YouTubeTranscriptApi
 import yt_dlp
 import random
 import time
@@ -9,67 +9,83 @@ import time
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Echt Nederlands", page_icon="🇳🇱")
 
-# --- Yardımcı Fonksiyon: Youtube Arama ---
+# --- Yardımcı Fonksiyon: Youtube Arama (Maskelenmiş) ---
 def youtube_ara(query, limit=5):
-    """yt-dlp kullanarak YouTube'da video arar."""
+    """
+    yt-dlp kullanarak YouTube'da video arar veya linki çözer.
+    YouTube'un bot korumasını aşmak için tarayıcı gibi davranır.
+    """
+    
+    # YouTube'u kandırmak için sahte tarayıcı başlıkları
     ydl_opts = {
         'quiet': True,
-        'extract_flat': True,
-        'default_search': f'ytsearch{limit}',
+        'extract_flat': True, # Sadece listeyi al
+        'nocheckcertificate': True,
+        'ignoreerrors': True,
+        'no_warnings': True,
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     }
+
+    # Eğer kullanıcı direkt link yapıştırdıysa arama yapma, linki çöz
+    if query.startswith("http"):
+        ydl_opts['default_search'] = 'auto' # Link ise otomatik tanı
+    else:
+        ydl_opts['default_search'] = f'ytsearch{limit}' # Kelime ise ara
+
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
+            # force_generic_extractor=False önemli
             result = ydl.extract_info(query, download=False)
+            
             if 'entries' in result:
-                return result['entries']
+                # Bir playlist veya arama sonucuysa
+                return list(filter(None, result['entries'])) # None olanları temizle
+            elif 'id' in result:
+                # Tek bir video linkiyse
+                return [result]
         except Exception as e:
-            st.error(f"Arama modülü hatası: {e}")
+            st.error(f"YouTube bağlantı hatası: {str(e)}")
     return []
 
-# --- Fonksiyon: Otomatik İçerik Üretici (V3 - Tam Otomatik) ---
+# --- Fonksiyon: Otomatik İçerik Üretici ---
 def otomatik_icerik_uret(konu, video_limiti=3, soru_basina_video=3):
     dersler = []
-    loglar = [] # Ekrana basmak için işlem kaydı
+    loglar = []
     
-    # 1. Videoları Ara
+    # 1. Videoları Bul
+    loglar.append(f"🔎 '{konu}' taranıyor...")
     sonuclar = youtube_ara(konu, limit=video_limiti)
     
     if not sonuclar:
-        loglar.append("❌ YouTube araması sonuç vermedi.")
+        loglar.append("❌ YouTube hiçbir sonuç döndürmedi. (IP engeli olabilir)")
         return dersler, loglar
-
-    loglar.append(f"🔎 '{konu}' için {len(sonuclar)} video bulundu, taranıyor...")
+    
+    loglar.append(f"✅ {len(sonuclar)} video bulundu. Altyazılar kontrol ediliyor...")
 
     for video in sonuclar:
-        vid_id = video['id']
-        vid_title = video.get('title', 'Bilinmeyen Başlık')
+        if not video: continue # Boş veri geldiyse geç
+        
+        vid_id = video.get('id')
+        vid_title = video.get('title', 'Başlıksız Video')
         
         try:
-            # 2. Altyazı Çekme (EN KAPSAMLI YÖNTEM)
-            # list_transcripts tüm dilleri listeler (Otomatik dahil)
+            # 2. Altyazı Çekme
+            # Listeyi al, hem Hollandaca (nl) hem otomatik (generated) olanlara bak
             transcript_list = YouTubeTranscriptApi.list_transcripts(vid_id)
             
             target_transcript = None
             
-            # Mevcut altyazıları gez ve 'nl' (Dutch) olanı yakala
-            # Hem 'nl' (standart) hem 'nl-NL' (Hollanda) kodlarına bakar
-            for t in transcript_list:
-                if t.language_code.startswith('nl'): 
-                    target_transcript = t
-                    break
-            
-            # Eğer Hollandaca bulamazsa, belki video İngilizcedir ama Hollandaca altyazı vardır?
-            # Şimdilik sadece sesi Hollandaca olanlara odaklanıyoruz.
-            
-            if not target_transcript:
-                # Son çare: Otomatik üretilenleri zorla dene
+            # Öncelik 1: Gerçek Hollandaca Altyazı
+            try:
+                target_transcript = transcript_list.find_transcript(['nl', 'nl-NL'])
+            except:
+                # Öncelik 2: Otomatik Üretilmiş Hollandaca
                 try:
                     target_transcript = transcript_list.find_generated_transcript(['nl', 'nl-NL'])
                 except:
-                    loglar.append(f"🔸 Atlandı (Altyazı yok): {vid_title[:30]}...")
+                    loglar.append(f"🔸 Atlandı (Altyazı yok): {vid_title[:20]}...")
                     continue
 
-            # Veriyi çek
             full_data = target_transcript.fetch()
             
             # 3. Soru Çıkarma
@@ -78,23 +94,19 @@ def otomatik_icerik_uret(konu, video_limiti=3, soru_basina_video=3):
             
             for satir in full_data:
                 if bulunan >= soru_basina_video: break
-                
-                # Çok uzun süreleri atla (10. dakikadan sonrasına bakma)
-                if satir['start'] > 600: break
+                if satir['start'] > 600: break # İlk 10 dakikaya bak
                 
                 txt = satir['text'].replace('\n', ' ').strip()
                 
-                # Çok kısa (ünlem vb.) veya çok uzun cümleleri ele
+                # Gereksiz karakter temizliği
+                if "[" in txt or "(" in txt or "♫" in txt: continue
+                
                 kelimeler = txt.split()
                 if len(kelimeler) < 4 or len(kelimeler) > 20: continue
-                
                 if txt in kullanilan_cumleler: continue
                 
-                # [Muziek] veya (Applaus) gibi ses efektlerini ele
-                if "[" in txt or "(" in txt: continue
-
                 # Soru yap
-                adaylar = [k for k in kelimeler if len(k) > 4] # En az 5 harfli kelime seç
+                adaylar = [k for k in kelimeler if len(k) > 4]
                 if not adaylar: continue
                 
                 cevap = random.choice(adaylar)
@@ -116,12 +128,9 @@ def otomatik_icerik_uret(konu, video_limiti=3, soru_basina_video=3):
                 kullanilan_cumleler.append(txt)
             
             if bulunan > 0:
-                loglar.append(f"✅ Eklendi ({bulunan} soru): {vid_title[:30]}...")
-            else:
-                loglar.append(f"🔸 Atlandı (Uygun cümle yok): {vid_title[:30]}...")
-
-        except Exception as e:
-            loglar.append(f"⚠️ Hata ({vid_title[:15]}...): {str(e)}")
+                loglar.append(f"📥 Eklendi ({bulunan} soru): {vid_title[:20]}...")
+                
+        except Exception:
             continue
             
     return dersler, loglar
@@ -139,7 +148,9 @@ with st.sidebar:
     if sifre == "1234":
         st.success("Yönetici Modu")
         
-        arama_konusu = st.text_input("Konu", "NOS Jeugdjournaal")
+        st.info("İpucu: Arama çalışmazsa direkt video linki yapıştırabilirsin.")
+        arama_konusu = st.text_input("Arama veya Video Linki", "NOS Jeugdjournaal")
+        
         col1, col2 = st.columns(2)
         with col1:
             video_sayisi = st.number_input("Taranacak", 1, 10, 3)
@@ -148,10 +159,8 @@ with st.sidebar:
         
         if st.button("İçerik Bul ve Ekle 🚀"):
             with st.status("İşlem yapılıyor...", expanded=True) as status:
-                st.write("YouTube taranıyor...")
                 yeni_veri, loglar = otomatik_icerik_uret(arama_konusu, video_sayisi, soru_adedi)
                 
-                st.write("--- İşlem Günlüğü ---")
                 for log in loglar:
                     st.text(log)
                 
@@ -162,13 +171,13 @@ with st.sidebar:
                         sonuc_df = pd.concat([eski_df, yeni_df], ignore_index=True) if not eski_df.empty else yeni_df
                         conn.update(data=sonuc_df)
                         status.update(label="Tamamlandı!", state="complete", expanded=False)
-                        st.success(f"✅ Toplam {len(yeni_veri)} yeni soru veritabanına eklendi!")
+                        st.success(f"✅ {len(yeni_veri)} yeni soru eklendi!")
                         st.balloons()
                     except Exception as e:
                         st.error(f"Kayıt Hatası: {e}")
                 else:
-                    status.update(label="İçerik Bulunamadı", state="error")
-                    st.warning("Hiçbir videodan uygun soru çıkarılamadı. Lütfen konuyu değiştirin.")
+                    status.update(label="Başarısız", state="error")
+                    st.warning("Video bulunamadı. Lütfen direkt video linki yapıştırarak deneyin.")
 
 # --- Öğrenci Arayüzü ---
 try:
