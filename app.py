@@ -1,93 +1,125 @@
 import streamlit as st
 import pandas as pd
 from streamlit_gsheets import GSheetsConnection
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtubesearchpython import VideosSearch
+import random
+import time
 
 # --- Sayfa Ayarları ---
 st.set_page_config(page_title="Echt Nederlands", page_icon="🇳🇱")
 
-st.title("🇳🇱 Hollandaca Dinleme Pratiği")
-st.markdown("Gerçek videolarla Hollandaca öğren.")
+# --- Fonksiyon: Otomatik Video Bulucu (Hunter) ---
+def otomatik_icerik_uret(konu, adet):
+    dersler = []
+    try:
+        search = VideosSearch(konu, limit=adet)
+        results = search.result()['result']
+        
+        for video in results:
+            vid_id = video['id']
+            try:
+                # Altyazı çek
+                transcript = YouTubeTranscriptApi.get_transcript(vid_id, languages=['nl', 'nl-NL'])
+                # İlk 2 dakikadaki uygun cümleleri bul
+                uygunlar = [t for t in transcript if 10 < t['start'] < 120 and len(t['text'].split()) > 4]
+                
+                if not uygunlar: continue
+                
+                secilen = random.choice(uygunlar)
+                cumle = secilen['text'].replace('\n', ' ')
+                
+                # Soru yap
+                kelimeler = cumle.split()
+                adaylar = [k for k in kelimeler if len(k) > 3]
+                if not adaylar: continue
+                
+                cevap = random.choice(adaylar)
+                temiz_cevap = ''.join(e for e in cevap if e.isalnum())
+                soru = cumle.replace(cevap, "______")
+                
+                dersler.append({
+                    "video_url": f"https://www.youtube.com/watch?v={vid_id}",
+                    "start_time": int(secilen['start']),
+                    "soru_metni": soru,
+                    "dogru_cevap": temiz_cevap,
+                    "seviye": "Otomatik"
+                })
+            except:
+                continue
+    except Exception as e:
+        st.error(f"Arama hatası: {e}")
+        
+    return dersler
 
-# --- Google Sheets Bağlantısı ---
-# ttl=0 önbelleği kapatır, her tıklamada veriyi taze çeker
+# --- Ana Uygulama ---
+st.title("🇳🇱 Hollandaca Dinleme Pratiği")
+
+# Bağlantı
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-try:
-    data = conn.read(ttl=0)
-    if data.empty:
-        st.error("Veritabanı boş veya okunamadı.")
-        st.stop()
-except Exception as e:
-    st.error(f"Google Sheets bağlantı hatası: {e}")
-    st.stop()
-
-# --- Sidebar (Filtreleme) ---
+# --- Admin Paneli (Sidebar'da Gizli) ---
 with st.sidebar:
-    st.header("Ayarlar")
-    # Mevcut seviyeleri veritabanından çekip listele
-    seviyeler = sorted(data['seviye'].unique().tolist())
-    secilen_seviye = st.selectbox("Seviye Seç:", seviyeler)
+    st.divider()
+    st.subheader("🕵️ Admin Paneli")
+    sifre = st.text_input("Admin Şifresi", type="password")
     
-    # "Soru Getir" butonu buraya daha çok yakışır
-    yeni_soru_btn = st.button("Yeni Soru Getir 🎲", type="primary")
+    # Şifreyi '1234' olarak belirledim, değiştirebilirsin
+    if sifre == "1234":
+        st.success("Giriş Başarılı!")
+        
+        arama_konusu = st.text_input("Konu (Örn: Dutch stories)", "Dutch A1 listening")
+        video_sayisi = st.slider("Kaç video aransın?", 1, 5, 3)
+        
+        if st.button("İçerik Bul ve Ekle 🚀"):
+            with st.spinner("YouTube taranıyor... Bu işlem 1-2 dakika sürebilir."):
+                # 1. Yeni verileri bul
+                yeni_veri_listesi = otomatik_icerik_uret(arama_konusu, video_sayisi)
+                
+                if yeni_veri_listesi:
+                    # 2. Mevcut verileri oku
+                    eski_df = conn.read(ttl=0)
+                    yeni_df = pd.DataFrame(yeni_veri_listesi)
+                    
+                    # 3. Birleştir
+                    birlesmis_df = pd.concat([eski_df, yeni_df], ignore_index=True)
+                    
+                    # 4. Google Sheets'i Güncelle (Yaz)
+                    conn.update(data=birlesmis_df)
+                    
+                    st.success(f"{len(yeni_veri_listesi)} yeni ders veritabanına eklendi!")
+                    st.balloons()
+                else:
+                    st.warning("Uygun video bulunamadı, başka bir konu dene.")
 
-# Seçilen seviyeye göre soruları filtrele
-filtrelenmis_sorular = data[data['seviye'] == secilen_seviye]
-
-# --- Soru Seçme Mantığı ---
-# Butona basıldığında VEYA henüz hiç soru seçilmemişse çalışır
-if yeni_soru_btn or 'current_question' not in st.session_state:
-    
-    if len(filtrelenmis_sorular) == 0:
-        st.warning(f"{secilen_seviye} seviyesinde henüz soru yok.")
+# --- Öğrenci Arayüzü (Normal Ekran) ---
+try:
+    # Veriyi çek
+    df = conn.read(ttl=0)
+    if df.empty:
+        st.info("Henüz ders yok. Admin panelinden ekleyin.")
         st.stop()
         
-    # Rastgele bir satır seç
-    yeni_soru = filtrelenmis_sorular.sample(1).iloc[0]
-    
-    # Session State'e kaydet (Sayfa yenilenince kaybolmasın)
-    st.session_state['current_question'] = yeni_soru
-    
-    # Önceki cevabı temizle (Yeni soru geldiği için)
-    if 'cevap_verildi' in st.session_state:
-        del st.session_state['cevap_verildi']
-    
-    # Eğer butona basıldıysa sayfayı yenile ki video güncellensin
-    if yeni_soru_btn:
+    # Rastgele Soru Getir
+    if st.button("Soru Getir 🎲", type="primary"):
+        row = df.sample(1).iloc[0]
+        st.session_state['q'] = row
         st.rerun()
 
-# --- Soruyu Ekrana Bas ---
-if 'current_question' in st.session_state:
-    q = st.session_state['current_question']
-    
-    # 1. Video
-    st.video(q['video_url'], start_time=int(q['start_time']))
-    
-    st.divider()
-    
-    # 2. Soru
-    st.subheader("Boşluğu Doldur:")
-    st.markdown(f"### {q['soru_metni']}")
-    
-    # 3. Cevap Formu (Enter'a basınca çalışsın diye)
-    with st.form(key='cevap_formu'):
-        kullanici_cevabi = st.text_input("Cevabınız:", key="cevap_input")
-        kontrol_btn = st.form_submit_button("Kontrol Et ✅")
-    
-    # 4. Kontrol Mantığı
-    if kontrol_btn:
-        dogru = str(q['dogru_cevap']).strip().lower()
-        girilen = kullanici_cevabi.strip().lower()
+    if 'q' in st.session_state:
+        q = st.session_state['q']
+        st.video(q['video_url'], start_time=int(q['start_time']))
+        st.write(f"**Soru:** {q['soru_metni']}")
         
-        if girilen == dogru:
-            st.success("Tebrikler! Doğru cevap. 🎉")
-            st.balloons()
-            st.session_state['cevap_verildi'] = True
-        else:
-            st.error("Maalesef yanlış.")
-            # İpucu verelim (Kelimenin ilk harfi)
-            st.info(f"İpucu: Kelime **{dogru[0].upper()}...** ile başlıyor.")
+        with st.form("cevap"):
+            cvp = st.text_input("Cevap")
+            btn = st.form_submit_button("Kontrol")
+            if btn:
+                if cvp.lower().strip() == str(q['dogru_cevap']).lower().strip():
+                    st.success("Doğru!")
+                else:
+                    st.error("Yanlış!")
+                    st.info(f"Cevap: {q['dogru_cevap']}")
 
-    # 5. Doğru bilince veya pes edince cevabı göster
-    if 'cevap_verildi' in st.session_state:
-        st.info(f"Tam Cümle: **{q['soru_metni'].replace('______', q['dogru_cevap'])}**")
+except Exception as e:
+    st.error("Veritabanı okunurken hata oluştu. Lütfen Google Sheet paylaşım ayarının 'Editor' olduğundan emin olun.")
