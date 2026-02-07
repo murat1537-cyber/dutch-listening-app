@@ -6,84 +6,79 @@ from streamlit_gsheets import GSheetsConnection
 st.set_page_config(page_title="Echt Nederlands", page_icon="🇳🇱")
 
 st.title("🇳🇱 Hollandaca Dinleme Pratiği")
-st.markdown("Seviyeni seç, videoyu izle ve boşluğu doldur!")
+st.markdown("Kısa videolarla Hollandaca öğren.")
 
 # --- Veritabanı Bağlantısı ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 try:
-    # Veriyi çek (ttl=0: Her seferinde taze veri al)
     df = conn.read(ttl=0)
-    
     if df.empty:
-        st.error("Veritabanı boş. Lütfen Google Sheets'e veri ekleyin.")
+        st.error("Veritabanı boş.")
         st.stop()
 
-    # --- Sidebar (Seviye Seçimi) ---
+    # --- Sidebar ---
     with st.sidebar:
-        st.header("⚙️ Ayarlar")
-        
-        # Veritabanındaki mevcut seviyeleri bul
+        st.header("Seviye Seç")
         mevcut_seviyeler = sorted(df['seviye'].unique().tolist())
-        secilen_seviye = st.selectbox("Hangi seviyede çalışmak istiyorsun?", mevcut_seviyeler)
+        secilen_seviye = st.selectbox("Seviye:", mevcut_seviyeler)
         
-        st.divider()
-        st.info("Bu uygulama Google Sheets veritabanı ile çalışır.")
+        # "Yeni Soru" butonu burada
+        if st.button("Yeni Soru Getir 🎲", type="primary"):
+            # Rastgele soru seç ve Session State'e at
+            filtrelenmis = df[df['seviye'] == secilen_seviye]
+            if not filtrelenmis.empty:
+                st.session_state['q'] = filtrelenmis.sample(1).iloc[0]
+                st.session_state['cevap_acildi'] = False # Cevabı gizle
+                st.session_state['kullanici_cevabi'] = "" # Eski cevabı sil
+                st.rerun()
 
-    # --- Soru Seçme Mantığı ---
-    # Sadece seçilen seviyedeki soruları filtrele
-    filtrelenmis_df = df[df['seviye'] == secilen_seviye]
-    
-    if filtrelenmis_df.empty:
-        st.warning(f"{secilen_seviye} seviyesinde henüz soru yok.")
+    # --- İlk Açılış Kontrolü ---
+    if 'q' not in st.session_state:
+        st.info("Soldaki menüden 'Yeni Soru Getir' butonuna basarak başla! 👈")
         st.stop()
 
-    # 'Soru Getir' butonu veya ilk açılış
-    if st.button("Yeni Soru Getir 🎲", type="primary") or 'q' not in st.session_state:
-        # Rastgele bir satır seç
-        st.session_state['q'] = filtrelenmis_df.sample(1).iloc[0]
-        st.session_state['cevap_goster'] = False # Cevabı gizle
+    # --- Ana Ekran ---
+    q = st.session_state['q']
 
-    # --- Soruyu Ekrana Bas ---
-    if 'q' in st.session_state:
-        q = st.session_state['q']
-        
-        # Video Oynatıcı
-        st.video(q['video_url'], start_time=int(q['start_time']))
-        
-        st.divider()
-        
-        # Soru Kartı
-        st.subheader("👂 Duyduğunu Yaz")
-        st.markdown(f"### {q['soru_metni']}")
-        
-        # Cevap Formu
-        with st.form("cevap_form"):
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                kullanici_cevabi = st.text_input("Boşluğa ne gelmeli?", key="cevap_input")
-            with col2:
-                # Butonu biraz aşağı hizalamak için boşluk
-                st.write("") 
-                st.write("")
-                kontrol_btn = st.form_submit_button("Kontrol Et ✅")
-            
-        # Doğrulama Mantığı
-        if kontrol_btn:
-            dogru = str(q['dogru_cevap']).strip().lower()
-            girilen = kullanici_cevabi.strip().lower()
-            
-            if girilen == dogru:
-                st.success("🎉 Harika! Doğru cevap.")
-                st.balloons()
-            else:
-                st.error("Maalesef yanlış.")
-                st.info(f"İpucu: Kelime **{len(dogru)}** harfli ve **'{dogru[0].upper()}...'** ile başlıyor.")
+    # 1. Video (Kısa ve öz)
+    st.video(q['video_url'], start_time=int(q['start_time']))
+    st.caption("Video yüklenmezse sayfayı yenile.")
 
-        # Cevabı Göster Butonu (Checkbox yerine buton daha şık)
-        if st.expander("Cevabı Göster 👀"):
-             st.info(f"Doğru Cevap: **{q['dogru_cevap']}**")
+    st.divider()
+
+    # 2. Soru Alanı
+    st.subheader("Boşluğu Doldur:")
+    st.markdown(f"### {q['soru_metni']}")
+
+    # 3. Cevap Formu
+    with st.form("cevap_kusu"):
+        # Kullanıcı cevabını buraya yazar
+        girilen = st.text_input("Cevabın:", key="kullanici_cevabi")
+        
+        # Butonlar yan yana
+        c1, c2 = st.columns([1, 1])
+        with c1:
+            kontrol_et = st.form_submit_button("Kontrol Et ✅")
+        with c2:
+            # Pes ederse cevabı görme butonu
+            pes_et = st.form_submit_button("Cevabı Göster 👀")
+
+    # 4. Sonuç Ekranı (Sadece butona basılınca çalışır)
+    if kontrol_et:
+        dogru = str(q['dogru_cevap']).strip().lower()
+        cevap = girilen.strip().lower()
+        
+        if cevap == dogru:
+            st.success("🎉 Tebrikler! Çok doğru.")
+            st.balloons()
+            st.session_state['cevap_acildi'] = True
+        else:
+            st.error("Maalesef yanlış.")
+            st.info(f"İpucu: Kelime **{len(dogru)}** harfli.")
+
+    if pes_et or st.session_state.get('cevap_acildi'):
+        st.warning(f"Doğru Cevap: **{q['dogru_cevap']}**")
 
 except Exception as e:
-    st.error(f"Bağlantı Hatası: {e}")
-    st.warning("Google Sheet dosyanızın 'Anyone with link' ve 'Viewer' modunda olduğundan emin olun.")
+    st.error(f"Hata: {e}")
